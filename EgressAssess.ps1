@@ -54,15 +54,26 @@ function Invoke-EgressAssess
     Default report location "C:\Egress-Assess\report.txt".
 
 .Parameter Fast
-    This switch drastically reduces the time required to generate fake data.
-    Note: fake data will be generated in batches of 500 sequential values.
+    This switch reduces the time required to generate fake data.
+    Note: Fake CC and SSN data will be generated in batches of 500 sequential values.
 
 .Example
     Import-Module Egress-Assess.ps1
-    Invoke-EgressAssess -client http -ip 127.0.0.1 -Datatype cc -Fast -Verbose 
+    Invoke-EgressAssess -client http -ip 127.0.0.1 -Datatype cc -Size 50 -Loop 20 -Fast -Verbose
+    Invoke-EgressAssess -client ftp -ip 127.0.0.1 -Username user -Password pass -Datatype ssn -Size 10 -Verbose
     Invoke-EgressAssess -client smb -ip 127.0.0.1 -Datatype "c:\Users\testuser\secrets.xlsx" -Verbose
     Invoke-EgressAssess -client icmp -ip 127.0.0.1 -Datatype ssn -Report -Verbose
-
+    Invoke-EgressAssess -client udp -ip 127.0.0.1 -port 53 -Datatype ssn -NoPing -Verbose -Size 100
+    Invoke-EgressAssess -client tcp -ip 127.0.0.1 -port 80 -Datatype ssn -NoPing -Verbose -Size 500
+    Invoke-EgressAssess -client offline -Datatype SSN -Size 500
+        Additional Notes:
+        server for TCP/UDP modes not implemented yet, use:  "nc -nvlp 80 > file.txt", "nc -nvlup 80 > file.txt", or  "for i in $(seq 1 10); do nc -nvlp 80 > file$i.txt; done"
+        TCP/UDP modes MUST specify -port option
+        UDP mode does NOT support -Loop option
+        UDP mode is slow (about 1MB/10second transfer speed in my testing)
+        Offline mode will generate fake data like normal, but will then store it locally on the target.  Useful if other protocols fail, but another C2 channel is already established (e.g. Meterpreter/Beacon)
+        Offline mode currently stores file named testData.txt in current Directory
+        Offline mode MUST specify a -IP parameter (unused)
 
 #>
     [CmdletBinding()]
@@ -94,7 +105,9 @@ function Invoke-EgressAssess
         [Parameter(Mandatory = $False)]
         [string]$Report,
         [Parameter(Mandatory = $False)]
-        [switch]$Fast
+        [switch]$Fast,
+        [Parameter(Mandatory = $False)]
+        [int]$port
     )
     begin
     {
@@ -211,11 +224,13 @@ function Invoke-EgressAssess
         
         function Generate-SSN
         {
-            $script:AllSSN = @()
+            #$script:AllSSN = @()
+            
             #determine the number of SSN based on 11 bytes per SSN 
             $num = [math]::Round(($Size * 1MB)/11)
             Write-Verbose "Generating $Size MB of Social Security Numbers ($num)..."
             $list = New-Object System.Collections.Generic.List[System.String]
+            
 
             for ($i = 0; $i -lt $num; $i++)
             {
@@ -247,13 +262,14 @@ function Invoke-EgressAssess
                 }           
             }
             
-            $script:AllSSN = $list.ToArray()
+            #$script:AllSSN = $list.ToArray()
+            $script:AllSSN = [String]$list
         }
         
         function Generate-CreditCards
         {
             
-            $script:AllCC = @()
+            #$script:AllCC = @()
             $script:list = New-Object System.Collections.Generic.List[System.String]
             
             Write-Verbose "[*] Generating Credit Cards............."
@@ -346,7 +362,8 @@ function Invoke-EgressAssess
                     $intCardType++
                 }
             }
-            $script:AllCC = $Script:list.ToArray()
+            #$script:AllCC = $Script:list.ToArray()
+            $script:AllCC = [String]$Script:list
         }
         
         function Generate-Identity
@@ -438,7 +455,8 @@ function Invoke-EgressAssess
                 $s = Get-Random -InputObject $r
                 $list.Add($s)
             }
-            $script:AllNames = $list.ToArray()
+            #$script:AllNames = $list.ToArray()
+            $script:AllNames = [String]$list
         }
         
         function Use-File
@@ -1250,7 +1268,172 @@ function Invoke-EgressAssess
                 While ($loops -gt 0)
             }
         }
-        
+
+        function Use-TCP
+        {
+            
+            # Detect what datatype we're sending
+            if ($Datatype -contains "ssn" -or "cc" -or "identity")
+            {
+                $totalupload = 0
+                if ($Datatype -eq "ssn")
+                {
+                    Generate-SSN
+                    $Data = $AllSSN
+                }
+                elseif ($Datatype -eq "cc")
+                {
+                    Generate-CreditCards
+                    $Data = $AllCC
+                }
+                elseif ($Datatype -eq "identity")
+                {
+                    Generate-Identity
+                    $Data = $AllNames
+                }                
+            }
+            else
+            {
+                Write-Verbose "[*] You did not provide a data type to generate."
+                Return
+            }
+      
+            Write-Verbose "[*] Sending data over raw TCP steam to $IP`:$port"
+            
+            Do
+            {
+                Try
+                {
+                    $client = New-Object System.Net.Sockets.TcpClient $IP, $port
+                    $stream = $client.GetStream()
+                    $writer = New-Object System.IO.StreamWriter $stream
+                    
+                    $writer.Write($Data)
+                    $writer.Flush()
+
+                    $writer.Close()
+                    $stream.Close()
+                }
+                catch
+                {
+                    $ErrorMessage = $_.Exception.Message
+                    Write-Verbose "[*] Error, tranfer failed with error:"
+                    Write-Verbose $ErrorMessage
+                    Break
+                }
+                Write-Verbose "[*] Transfer complete!"
+                $loops--
+                Write-Verbose "[*] $loops loops remaining.."
+            }
+            While ($loops -gt 0)
+        }
+
+        function Use-UDP
+        {
+            # Detect what datatype we're sending
+            if ($Datatype -contains "ssn" -or "cc" -or "identity")
+            {
+                $totalupload = 0
+                if ($Datatype -eq "ssn")
+                {
+                    Generate-SSN
+                    $Data = $AllSSN
+                }
+                elseif ($Datatype -eq "cc")
+                {
+                    Generate-CreditCards
+                    $Data = $AllCC
+                }
+                elseif ($Datatype -eq "identity")
+                {
+                    Generate-Identity
+                    $Data = $AllNames
+                }                
+            }
+            else
+            {
+                Write-Verbose "[*] You did not provide a data type to generate."
+                Return
+            }
+      
+            Write-Verbose "[*] Sending data over raw UDP steam to $IP`:$port"
+            
+            Try
+            {
+
+                $udpObject = New-Object System.Net.Sockets.UdpClient
+                $udpObject.Connect($IP, $port)
+                $udpObject.Client.ReceiveTimeout = 1000
+                #$udpObject.Client.Blocking = $False
+                $encoder = new-object system.text.asciiencoding
+                
+                for ($i = 0; $i -lt ($Data.Length - 4096); $i += 4096) 
+                {
+                    sleep -milliseconds 20
+                    $byte = $encoder.GetBytes($data.substring($i,4096))
+                    [void]$udpObject.Send($byte, $byte.length)
+                }
+                
+                $udpObject.close()
+            }
+            catch
+            {
+                $ErrorMessage = $_.Exception.Message
+                Write-Verbose "[*] Error, tranfer failed with error:"
+                Write-Verbose $ErrorMessage
+                Break
+            }
+            Write-Verbose "[*] Transfer complete!"
+            $loops--
+            Write-Verbose "[*] $loops loops remaining.."
+        }
+
+        function Use-OFFLINE
+        {
+            # Detect what datatype we're sending
+            if ($Datatype -contains "ssn" -or "cc" -or "identity")
+            {
+                $totalupload = 0
+                if ($Datatype -eq "ssn")
+                {
+                    Generate-SSN
+                    $Data = $AllSSN
+                }
+                elseif ($Datatype -eq "cc")
+                {
+                    Generate-CreditCards
+                    $Data = $AllCC
+                }
+                elseif ($Datatype -eq "identity")
+                {
+                    Generate-Identity
+                    $Data = $AllNames
+                }                
+            }
+            else
+            {
+                Write-Verbose "[*] You did not provide a data type to generate."
+                Return
+            }
+
+            $pwd = Get-Location | % { $_.Path }
+
+            Try 
+            {
+                #Out-File -InputObject $Data -FilePath "TestData.txt"
+                [System.IO.File]::WriteAllLines("TestData.txt", $Data)
+            }
+            catch
+            {
+                Write-Output "Unable to save file in $pwd/TestData.txt"
+                Write-Output $_
+                Exit
+            }
+            
+            Write-Output "Data Saved to $pwd/TestData.txt"
+        }
+
+    
         function Use-Ftp
         {
             if ($Datatype -contains "ssn" -or "cc" -or "identity")
@@ -1899,6 +2082,10 @@ function Invoke-EgressAssess
         {
             Use-Actor $Actor
         }
+        if ($client -eq "tcp" -or $client -eq "udp" -or $client -eq "offline")
+        {
+            $NoPing = $true
+        }
         if (!$NoPing)
         {
             Test-ServerConnection
@@ -1935,6 +2122,18 @@ function Invoke-EgressAssess
         elseif ($client -eq "smb")
         {
             Use-SMB
+        }
+        elseif ($client -eq "tcp")
+        {
+            Use-TCP
+        }
+        elseif ($client -eq "udp")
+        {
+            Use-UDP
+        }
+        elseif ($client -eq "offline")
+        {
+            Use-OFFLINE
         }
         else
         {
